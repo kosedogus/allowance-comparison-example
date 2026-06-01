@@ -104,42 +104,6 @@ the vendored file lives under the matching address in `Move.toml`.
 Every `#[test]` carries a one-line `// Proves: …` tag — grep for it
 to skim the comparison axes without reading the design doc.
 
-## Run
-
-```
-sui move build
-sui move test
-```
-
-Expected output:
-
-```
-[ PASS    ] allowance_example::baseline_comparison_tests::baseline_v1_unbound_delegation
-[ PASS    ] allowance_example::baseline_comparison_tests::baseline_v2_unbound_delegation
-[ PASS    ] allowance_example::subscription_comparison_tests::happy_path_v1_bound_consume
-[ PASS    ] allowance_example::subscription_comparison_tests::happy_path_v2_bounded_delegation
-[ PASS    ] allowance_example::subscription_comparison_tests::failure_v1_wrong_cap_cannot_grant
-[ PASS    ] allowance_example::subscription_comparison_tests::failure_v2_cross_vault_cap_cannot_spend
-[ PASS    ] allowance_example::aggregator_comparison_tests::happy_v1_aggregator_as_spender
-[ PASS    ] allowance_example::aggregator_comparison_tests::happy_v2_protocol_owned_caps
-[ PASS    ] allowance_example::aggregator_comparison_tests::v2_cap_id_survives_set_allowance
-[ PASS    ] allowance_example::aggregator_comparison_tests::failure_v1_keeper_cannot_rebalance_as_self
-[ PASS    ] allowance_example::owner_rotation_comparison_tests::happy_v1_owner_cap_transfer
-[ PASS    ] allowance_example::owner_rotation_comparison_tests::happy_v2_destroy_recreate
-[ PASS    ] allowance_example::owner_rotation_comparison_tests::failure_v2_old_cap_dead_after_migration
-[ PASS    ] allowance_example::owner_check_comparison_tests::happy_v1_owner_with_cap_can_place_order
-[ PASS    ] allowance_example::owner_check_comparison_tests::failure_v1_wrong_cap_rejected
-[ PASS    ] allowance_example::owner_check_comparison_tests::happy_v2_owner_sender_passes_check
-[ PASS    ] allowance_example::owner_check_comparison_tests::failure_v2_non_owner_sender_rejected
-[ PASS    ] allowance_example::rate_limited_comparison_tests::happy_v1_integrator_side_cooldown
-[ PASS    ] allowance_example::rate_limited_comparison_tests::happy_v2_embedded_limiter
-[ PASS    ] allowance_example::rate_limited_comparison_tests::v2_suspend_and_resume_preserves_cap
-[ PASS    ] allowance_example::bystander_v2_tests::v2_bystander_creates_for_alice_alice_destroys
-Test result: OK. Total tests: 21; passed: 21; failed: 0
-```
-
----
-
 ## Foundational properties — both versions
 
 These semantics are true on v1 AND v2. Important context before reading
@@ -792,34 +756,3 @@ and pockets Mallory's deposit as a refund.
   registry and gate a function that internally calls `spend` /
   `consume`), but cannot be the allowance library's own auth gate.
 
-### Test gaps the team should explicitly accept or close
-
-These are properties or scenarios that neither library's test suite
-witnesses in this example package; the team may want to add them
-before publication or accept the gap.
-
-- **Over-subscription witness on the foundational-property side.**
-  No test creates a vault with `balance = 100`, three spenders each
-  granted `60` (total grants = 180), and shows the first two spends
-  succeed (60 + 40) while the third aborts `EInsufficientVault`.
-  Without this, the "allowance ≠ guarantee" property is documented
-  but not demonstrated.
-- **`revoke` racing `spend`.** Both libraries deterministically
-  serialize the two on the same shared Vault; no test pins the
-  ordering. An attacker shaping state to make a `revoke` race a
-  spend is the closest thing to a kill-switch failure case.
-- **Inert-entry / inert-cap storage drift.** A spender consume-to-zero
-  on v1 leaves an inert entry; v2's revoke leaves the cap object as
-  garbage in the holder's wallet. Neither is "wrong" — both are
-  documented — but neither is tested as a long-tail storage
-  observability concern.
-- **Permissionless-deposit dust-spam.** v1's `deposit` accepts
-  zero-value coins; v2's rejects them. Neither library tests the
-  event-stream-flood case (an attacker permissionlessly depositing
-  1-unit USDC in a tight loop to bloat indexer event streams). v2's
-  zero-amount reject closes one half of this; the other half
-  (small-but-nonzero spam) is integrator's problem on both sides.
-- **Clock-trust model.** Both rely on Sui's shared `Clock` for expiry
-  and rate-limiter timing. No test explores adversarial-Clock
-  conditions; production indexers + integrators should know they
-  inherit Sui's `Clock` guarantees, not the library's.
