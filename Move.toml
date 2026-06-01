@@ -1,0 +1,11 @@
+[package]
+name = "allowance_example"
+edition = "2024"
+
+[dependencies]
+Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "73dd2c2ba6f9fdb21d7ffde2b50a3f2f0ac39bc1" }
+
+[addresses]
+openzeppelin_allowance = "0x0"
+openzeppelin_utils = "0x0"
+allowance_example = "0x0"
