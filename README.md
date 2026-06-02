@@ -53,7 +53,7 @@ consequences at once.
 | **D2 (sub-property)** | Suspension idiom (freeze without breaking embedded caps) | **v2-only** | `set_allowance(K, 0, ...)` keeps the entry alive and the cap stable. v1 has no equivalent — revoke removes the entry; re-grant has no embedded-cap stability story (address-keyed). |
 | **D2 (sub-property)** | Cap-ID stability across `set_allowance` | **v2-only** | Owner-side parameter changes mutate the entry in place; the cap object held by downstream wrappers / protocol tables survives untouched. |
 | **D3 — Owner identity** (Face A) | Owner rotation (multisig A → multisig B) | **v1** | v1's `OwnerCap` is a transferable object — one `public_transfer`. v2's owner address is immutable; rotation = destroy + recreate + re-grant every spender. |
-| **D3 — Owner identity** (Face B) | Owner provenance check (integrator verifies "caller owns this vault") | **v2** | v2 exposes `sv::owner(&v) -> address`; integrator does one `==` against `ctx.sender()`. v1 has no native reader — integrator must take `&OwnerCap` as a parameter on every function that wants the check. |
+| **D3 — Owner identity** (Face B) | Owner provenance check (integrator verifies "caller owns this vault") | **v2** | v2 exposes `sv::owner(&v) -> address` — the address itself is readable on-chain and compares to anything. v1 cannot read the owner address from `&Vault` at all (it lives in Sui's object-ownership layer, not on the vault); the cap-passing workaround proves only "caller is the owner," not "address X is." |
 | **D4 — Rate limiting** | Rate-limited charges (one charge per hour) | **v2** | v2 ships `Option<RateLimiter>` per allowance — library enforces. v1 needs an integrator-side `BotPolicy` object with manual time tracking. |
 
 **D3 is bundled.** Pick v1's transferable `OwnerCap` → accept the Face
@@ -429,31 +429,49 @@ See [`owner_rotation_v1.move`](sources/integration/owner_rotation_v1.move),
 registry, marketplace listing) wants to refuse interactions unless the
 caller is the rightful owner of the vault they are pointing at.
 
-#### v1 — integrator takes `&OwnerCap` as a parameter
+#### v1 — the owner address cannot be read on-chain at all
+
+`Vault` has no `owner` field; `OwnerCap` has no `owner_address` field
+either (it carries only `id` and `vault_id`). The owner's address
+lives in Sui's runtime object-ownership layer (whichever address
+currently holds the `OwnerCap` object), and Move code has no
+primitive to read "the current owner of object X." That information
+is reachable only via off-chain RPC.
+
+The closest workaround at the integration level is to have the
+**caller pass their `&OwnerCap` as a function parameter** and verify
+its binding:
 
 ```move
 public fun place_order<U>(v: &Vault<U>, cap: &OwnerCap, ...) {
-    // v1 has no `vault.owner() -> address` reader. The owner is
-    // "whoever currently holds the OwnerCap" — not stored on the vault.
-    // The provable check is cap-binding: the caller must hand the
-    // bound cap in.
     assert!(coin_allowance::cap_id(v) == object::id(cap), E_WRONG_VAULT);
     // proceed
 }
 ```
 
-The check is sound (an attacker cannot forge a bound cap), but it
-imposes a structural cost: every integrator function that wants
-ownership-provenance must include `&OwnerCap` in its signature, and
-every caller must hold + plumb the cap into the call. PTB-side that
-means an extra owned-object input.
+What this actually proves — and what it does NOT prove:
 
-**Cost of choosing v1 here:** every integrator function wanting
-ownership-provenance must accept `&OwnerCap` in its signature. Callers
-must hold and plumb the cap into every call — one extra owned-object
-input per PTB. Integrators end up shaping their public APIs around
-the allowance library's authority object, which couples otherwise
-unrelated protocol code to `coin_allowance`.
+- ✅ Proves "the cap that authorizes this vault is in this PTB." By
+  Sui's object-input semantics, the cap must be an input the
+  transaction is authorized for — so for the common case where the
+  owner holds the cap directly, this proves "the caller is the owner."
+- ❌ Does **not** expose the owner's address to integrator code.
+  v1 cannot answer "is `0xALICE` the owner of this vault?" for an
+  arbitrary `0xALICE` on-chain — there is no path from `&Vault` to
+  an address. Off-chain RPC can answer it; Move cannot.
+- ❌ Does **not** generalize if the cap is wrapped in a shared
+  custody object (multisig, DAO). The wrapper's own auth logic
+  decides who can extract `&cap`; the binding check sees only "cap
+  matches vault," not "caller is the human behind the wrapper."
+
+**Cost of choosing v1 here:** the workaround only answers "is the
+caller the owner?" in the simple case. Any integrator function that
+needs to know **who** the owner is, or to verify ownership by a
+specific address (without forcing that address to pass their cap
+in), is not expressible against v1's `&Vault` alone. Beyond the
+capability gap, every function that uses the workaround takes an
+extra `&OwnerCap` parameter and forces every caller to plumb the
+cap into the PTB.
 
 #### v2 — integrator reads `vault.owner` directly
 
@@ -464,10 +482,17 @@ public fun place_order<U>(v: &Vault<U>, ..., ctx: &TxContext) {
 }
 ```
 
-One address comparison, no cap parameter. The integrator's public API
-stays decoupled from the allowance library's authority objects. The
-property is sound because `v.owner` is immutable from `new` — nothing
-can rotate underneath in-flight state.
+`spend_vault::owner(&v)` returns the stored owner `address` as a
+total, on-chain read. The integrator can compare it to `ctx.sender()`,
+to a known constant, to a value stored in another object, or to an
+arbitrary argument — the address is exposed, not just verifiable by
+proxy. The property is sound because `v.owner` is immutable from
+`new` (nothing can rotate underneath in-flight state).
+
+This is **strictly more expressive** than v1's cap-passing workaround,
+not a different ergonomic. v1 cannot expose the address at all; v2
+exposes it directly. The Face A cost (rotation = destroy + recreate)
+is the price paid for this expressiveness.
 
 **Cost of choosing v2 here:** the on-chain check is rock-solid because
 `vault.owner` cannot move. The flip side is Face A's pain — once the
@@ -483,17 +508,17 @@ See [`owner_check_v1.move`](sources/integration/owner_check_v1.move),
 
 | | Face A (rotation) | Face B (on-chain verification) |
 |---|---|---|
-| **v1 — transferable `OwnerCap`** | ✅ One `public_transfer`, delegations untouched | ❌ Integrator must take `&OwnerCap` in every function signature |
-| **v2 — immutable `owner: address`** | ❌ Destroy + recreate + re-grant N spenders | ✅ `sv::owner(&v) == ctx.sender()` — one line, no cap |
+| **v1 — transferable `OwnerCap`** | ✅ One `public_transfer`, delegations untouched | ❌ The owner address is NOT readable from `&Vault` on-chain. The cap-passing workaround verifies only "caller is the owner" (and only when the cap is held directly), not "address X is the owner" |
+| **v2 — immutable `owner: address`** | ❌ Destroy + recreate + re-grant N spenders | ✅ `sv::owner(&v) -> address` returns the address; integrator compares to anything (`ctx.sender()`, a stored value, a function argument) |
 
 **The team is picking the row, not the cell.** Pick v1's transferable
-cap → accept that every integrator function wanting on-chain
-"is-the-caller-the-owner" needs an `&OwnerCap` parameter (Face B
-cost). Pick v2's immutable address → accept that rotation requires
-remigrating the delegation tree (Face A cost). There is no library
-shape that wins both faces — "v1 owner + v2 owner-queryability" is
-mechanically impossible because owner-as-cap and owner-as-stored-address
-are mutually exclusive representations of the same field.
+cap → accept that the owner address is not exposed to Move code at all
+(Face B capability gap). Pick v2's immutable address → accept that
+rotation requires remigrating the delegation tree (Face A cost). There
+is no library shape that wins both faces — "v1 owner + v2 owner-
+queryability" is mechanically impossible because owner-as-cap and
+owner-as-stored-address are mutually exclusive representations of the
+same field.
 
 ---
 
